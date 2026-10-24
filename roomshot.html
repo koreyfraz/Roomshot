@@ -154,14 +154,17 @@ function parseLen(raw){
 
 // ---------- state ----------
 const KEY='roomshot.v1';
+// Native iOS shell bridge (present only inside the RoomShot app)
+const NATIVE=!!(window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.native);
+function nativeMsg(m){try{window.webkit.messageHandlers.native.postMessage(m)}catch(e){}}
 const sample=()=>({id:uid(),name:'Sample: Conf 204',auto:true,ceil:2.74,
   walls:[{L:5.0,A:90},{L:2.4,A:135},{L:1.70,A:135},{L:3.80,A:90}],
   sec:{wall:0,pts:[{x:0,f:0,h:2.44},{x:2.5,f:0,h:3.35},{x:4.2,f:-0.1,h:2.80},{x:5.0,f:-0.1,h:2.54}]}});
 const blank=n=>({id:uid(),name:'Room '+n,auto:true,ceil:2.44,walls:[{L:null,A:90}],sec:{wall:0,pts:[]}});
 function uid(){return Math.random().toString(36).slice(2,9)}
 let S=load(); let tab='plan', armed=null, btState='off', lastPacket='', delArm=null;
-function load(){try{const j=JSON.parse(localStorage.getItem(KEY)); if(j&&j.rooms&&j.rooms.length) return j}catch(e){} return {units:'imp',cur:0,rooms:[sample()],allDev:false}}
-function save(){try{localStorage.setItem(KEY,JSON.stringify(S))}catch(e){}}
+function load(){const ns=window.__nativeState; if(ns&&ns.rooms&&ns.rooms.length) return ns; try{const j=JSON.parse(localStorage.getItem(KEY)); if(j&&j.rooms&&j.rooms.length) return j}catch(e){} return {units:'imp',cur:0,rooms:[sample()],allDev:false}}
+function save(){const j=JSON.stringify(S); try{localStorage.setItem(KEY,j)}catch(e){} if(NATIVE) nativeMsg({cmd:'state',json:j})}
 const room=()=>S.rooms[S.cur]||S.rooms[0];
 
 // ---------- geometry ----------
@@ -337,6 +340,8 @@ function secEditor(r,g){
   <p class="hint">${g.sec?`Cut through the middle of the room, ${fmt(g.sec.S)} wide. Measure "From wall" from the left end of the cut.`:'Close the floor plan first to place the cut line.'}</p>
   <div class="field"><label for="secwall">Runs along</label><select id="secwall">${opts}</select></div>
   <div class="bar"><span class="hint" style="margin:0">Start from</span><button class="btn" data-act="pre" data-p="flat">Flat</button><button class="btn" data-act="pre" data-p="shed">Shed</button><button class="btn" data-act="pre" data-p="gable">Gable</button><button class="btn" data-act="pre" data-p="clear">Clear</button></div>
+  <div class="field"><label for="flattol">Flatten within</label><select id="flattol">${[[0.025,'1"'],[0.05,'2"'],[0.075,'3"'],[0.10,'4"'],[0.15,'6"'],[0.20,'8"'],[0.30,'12"']].map(([v,l])=>`<option value="${v}"${Math.abs(flatTol()-v)<1e-6?' selected':''}>${S.units==='met'?Math.round(v*100)+' cm':l}</option>`).join('')}</select></div>
+  <div class="bar"><button class="btn" data-act="flatten">Simplify floor &amp; ceiling</button><span class="hint" style="margin:0">Heights that vary less than this become one flat surface.</span></div>
   <div class="list"><div class="row pts hd"><span>#</span><span>From wall</span><span>Floor ±</span><span>Ceiling</span><span></span></div>`;
   r.sec.pts.forEach((p,i)=>{h+=`<div class="row pts"><span class="num">${i+1}</span>${cell(`s:${i}:x`,fmt(p.x),{ph:'Shoot'})}${cell(`s:${i}:f`,fmt(p.f||0))}${cell(`s:${i}:h`,fmt(p.h),{ph:'Shoot'})}<button class="del" data-act="delPt" data-i="${i}" aria-label="Delete point ${i+1}">×</button></div>`});
   if(!r.sec.pts.length) h+=`<div class="row"><span class="hint" style="margin:6px 0">No points yet.</span></div>`;
@@ -392,6 +397,7 @@ document.addEventListener('click',e=>{
     r.sec.pts=p==='flat'?[{x:0,f:0,h:c},{x:W,f:0,h:c}]:p==='shed'?[{x:0,f:0,h:c},{x:W,f:0,h:c+W*0.25}]:p==='gable'?[{x:0,f:0,h:c},{x:W/2,f:0,h:c+W/2/3},{x:W,f:0,h:c}]:[];
     armed=r.sec.pts.length?'s:0:h':null; if(p!=='clear') toast('Now shoot each point to replace the guesses')}
   if(a==='delRoom'){ if(delArm!==r.id){delArm=r.id} else {S.rooms.splice(S.cur,1); if(!S.rooms.length) S.rooms.push(blank(1)); S.cur=0; delArm=null; armed=null}}
+  if(a==='flatten'){const before=r.sec.pts.length; flattenRoom(r); toast(r.sec.pts.length<before?`Simplified to ${r.sec.pts.length} points`:'Already as simple as it gets at this tolerance')}
   if(a==='export'){exportSheet();return}
   if(a==='dae'){exportDAE();return}
   save();render();
@@ -399,6 +405,7 @@ document.addEventListener('click',e=>{
 document.addEventListener('change',e=>{const r=room(),t=e.target;
   if(t.id==='auto'){r.auto=t.checked}
   if(t.id==='rname'){r.name=t.value.trim()||'Room'}
+  if(t.id==='flattol'){S.flatTol=+t.value}
   if(t.id==='secwall'){r.sec.wall=+t.value; if(r.scanSecs&&r.scanSecs[t.value]) r.sec.pts=JSON.parse(JSON.stringify(r.scanSecs[t.value]))}
   save();render();});
 
@@ -408,6 +415,7 @@ let dev=null, chr=null, wake=null;
 const hex=b=>[...b].map(x=>x.toString(16).padStart(2,'0')).join(' ');
 function setBt(s,label){btState=s;$('bt').dataset.s=s;$('btLabel').textContent=label}
 async function connect(){
+  if(NATIVE){ if(btState==='on'||btState==='busy') nativeMsg({cmd:'bleDisconnect'}); else {setBt('busy','Searching…'); nativeMsg({cmd:'bleConnect'})} return }
   if(!navigator.bluetooth){setBt('na','No Bluetooth');openModal(`<h3>Bluetooth isn't available here</h3><p>This browser can't talk to Bluetooth devices. On iPhone, open this page in the free <b>Bluefy</b> browser. On Android or a computer, use Chrome.</p><p>You can still type measurements: tap a field twice.</p><div class="bar"><button class="btn pri" data-close>OK</button></div>`);return}
   if(dev&&dev.gatt.connected){dev.gatt.disconnect();return}
   try{
@@ -422,10 +430,12 @@ async function connect(){
     setBt('on',(dev.name||'Meter').slice(0,16)); toast('Meter connected. Tap a field, then measure.'); grabWake();
   }catch(err){ setBt('off','Connect meter'); if(err&&err.name!=='NotFoundError') toast((err&&err.message)||'Couldn\'t connect'); }
 }
-function onData(ev){
-  const dv=ev.target.value, b=new Uint8Array(dv.buffer,dv.byteOffset,dv.byteLength); lastPacket=hex(b);
+function handlePacket(b,dv){ lastPacket=hex(b);
   if(b.length>=11&&b[0]===0xC0&&b[1]===0x55&&b[2]===0x10){const m=dv.getFloat32(7,true); if(m>0.02&&m<250) applyReading(m)}
 }
+function onData(ev){const dv=ev.target.value; handlePacket(new Uint8Array(dv.buffer,dv.byteOffset,dv.byteLength),dv)}
+window.nativeBleData=arr=>{const b=new Uint8Array(arr); handlePacket(b,new DataView(b.buffer))};
+window.nativeBle=(s,label)=>{setBt(s,label); if(s==='on') toast('Meter connected. Tap a field, then measure.')};
 async function grabWake(){try{wake=await navigator.wakeLock.request('screen')}catch(e){}}
 function releaseWake(){try{wake&&wake.release()}catch(e){} wake=null}
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&btState==='on') grabWake()});
@@ -447,6 +457,9 @@ $('mcard').addEventListener('click',async e=>{const t=e.target.closest('button')
   if(t.dataset.u){S.units=t.dataset.u;save();render();[...t.parentNode.children].forEach(b=>b.classList.toggle('on',b===t))}
   if(t.id==='copyj'){const ta=$('json');try{await navigator.clipboard.writeText(ta.value);toast('Copied')}catch(err){ta.select();toast('Selected — copy it from the menu')}}
   if(t.id==='loadj'){try{const j=JSON.parse($('json').value); if(!j.rooms||!j.rooms.length) throw 0; S=j;S.cur=0;save();render();$('modal').hidden=true;toast('Restored')}catch(err){toast('That text isn\'t a RoomShot backup')}}
+  if(t.id==='scanlive'){$('modal').hidden=true; nativeMsg({cmd:'scan'}); return}
+  if(t.id==='scanfile'){$('modal').hidden=true; pickFile(); return}
+  if(t.dataset.nsave!=null&&window._pngBlob){saveFile(window._pngName,window._pngBlob,'image/png'); return}
   if(t.id==='copydae'){const ta=$('daetext');try{await navigator.clipboard.writeText(ta.value);toast('Copied')}catch(err){ta.select();toast('Selected — copy it from the menu')}}
   if(t.dataset.savepng!=null&&dl&&window._pngBlob){try{await dl.save({filename:window._pngName,data:window._pngBlob});toast('Saved')}catch(err){}}
   if(t.dataset.share!=null&&window._png){try{await navigator.share({files:[window._png],title:room().name})}catch(err){}}
@@ -472,7 +485,7 @@ async function exportSheet(){
     c.fillStyle='#5E6B66'; c.font='10px Menlo,monospace'; c.fillText('Field sketch. Not to scale for construction.',16,head+ph+gap+20+sh+30);
     const url=cv.toDataURL('image/png'); window._png=null; window._pngBlob=null; window._pngName=(r.name||'room').replace(/[^\w-]+/g,'_')+'.png';
     try{const blob=await new Promise(res=>cv.toBlob(res,'image/png')); window._pngBlob=blob; const f=new File([blob],(r.name||'room').replace(/[^\w-]+/g,'_')+'.png',{type:'image/png'}); if(navigator.canShare&&navigator.canShare({files:[f]})) window._png=f}catch(err){}
-    openModal(`<h3>Sheet ready</h3><p>Press and hold the image to save it to Photos${window._png?', or share it':''}.</p><img src="${url}" alt="Plan and section sheet for ${esc(r.name)}"><div class="bar">${window._png?'<button class="btn pri" data-share>Share…</button>':''}${dl&&window._pngBlob?'<button class="btn pri" data-savepng>Save PNG</button>':''}<button class="btn" data-close>Close</button></div>`);
+    openModal(`<h3>Sheet ready</h3><p>Press and hold the image to save it to Photos${window._png?', or share it':''}.</p><img src="${url}" alt="Plan and section sheet for ${esc(r.name)}"><div class="bar">${window._png?'<button class="btn pri" data-share>Share…</button>':''}${dl&&window._pngBlob?'<button class="btn pri" data-savepng>Save PNG</button>':''}${NATIVE&&window._pngBlob?'<button class="btn pri" data-nsave>Save or share…</button>':''}<button class="btn" data-close>Close</button></div>`);
   }catch(err){toast('Couldn\'t build the image: '+(err&&err.message||err))}
 }
 
@@ -567,8 +580,10 @@ function daeFor(r){
     ge+=`<geometry id="${id}-geo" name="${nm}"><mesh><source id="${id}-pos"><float_array id="${id}-pos-arr" count="${pos.length}">${pos.join(' ')}</float_array><technique_common><accessor source="#${id}-pos-arr" count="${pos.length/3}" stride="3"><param name="X" type="float"/><param name="Y" type="float"/><param name="Z" type="float"/></accessor></technique_common></source><vertices id="${id}-vtx"><input semantic="POSITION" source="#${id}-pos"/></vertices><triangles material="${id}-sym" count="${tris.length}"><input semantic="VERTEX" source="#${id}-vtx" offset="0"/><p>${idx.join(' ')}</p></triangles></mesh></geometry>`;
     nd+=`<node id="${id}-node" name="${nm}"><instance_geometry url="#${id}-geo"><bind_material><technique_common><instance_material symbol="${id}-sym" target="#${id}-mat"/></technique_common></bind_material></instance_geometry></node>`}
   return `<?xml version="1.0" encoding="utf-8"?>\n<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1"><asset><contributor><authoring_tool>RoomShot</authoring_tool></contributor><created>${new Date().toISOString()}</created><modified>${new Date().toISOString()}</modified><unit name="meter" meter="1"/><up_axis>Z_UP</up_axis></asset><library_effects>${fx}</library_effects><library_materials>${mt}</library_materials><library_geometries>${ge}</library_geometries><library_visual_scenes><visual_scene id="scene" name="${esc(r.name)}"><node id="room" name="${esc(r.name)}">${nd}</node></visual_scene></library_visual_scenes><scene><instance_visual_scene url="#scene"/></scene></COLLADA>`}
+function blobB64(b){return new Promise((res,rej)=>{const r=new FileReader(); r.onload=()=>res(String(r.result).split(',')[1]); r.onerror=rej; r.readAsDataURL(b)})}
 async function saveFile(name,text,mime){
-  const blob=new Blob([text],{type:mime});
+  if(NATIVE){const b=text instanceof Blob?text:new Blob([text],{type:mime}); nativeMsg({cmd:'save',name,b64:await blobB64(b)}); return}
+  const blob=text instanceof Blob?text:new Blob([text],{type:mime});
   try{const f=new File([blob],name,{type:mime}); if(navigator.canShare&&navigator.canShare({files:[f]})){await navigator.share({files:[f],title:name});return}}catch(e){if(e&&e.name==='AbortError') return}
   let framed=true; try{framed=window.self!==window.top}catch(e){}
   if(framed&&dl){
@@ -581,21 +596,34 @@ function exportDAE(){const r=room(),d=daeFor(r); if(!d){toast('Close the floor p
 
 // ---------- scan import (OBJ / GLB / ZIP from LiDAR apps or Matterport) ----------
 let scan=null;
-function pickScan(){const i=document.createElement('input'); i.type='file'; i.addEventListener('change',()=>{if(i.files[0]) loadScan(i.files[0])}); i.click()}
+function pickScan(){ if(!NATIVE){pickFile();return}
+  openModal(`<h3>New scan</h3><p>Scan the room with the iPhone's LiDAR, or import a file from another scanning app.</p><div class="bar"><button class="btn pri" id="scanlive">Scan with LiDAR</button><button class="btn" id="scanfile">Import a file</button><button class="btn" data-close>Cancel</button></div>`)}
+window.nativeScanReady=async n=>{openModal(`<h3>Reading scan…</h3><p>${Number(n).toLocaleString()} surface triangles.</p>`); await new Promise(r=>setTimeout(r,60));
+  try{const buf=await (await fetch('scan.bin?t='+Date.now())).arrayBuffer(); const raw=new Float32Array(buf); if(raw.length<27) throw new Error('The scan came back empty. Scan again and cover more of the room.');
+    scan={raw,name:'Scan '+new Date().toLocaleDateString(),up:'y',square:true}; orientScan(); scanModal()}
+  catch(err){openModal(`<h3>Couldn't load the scan</h3><p>${esc(err.message||String(err))}</p><div class="bar"><button class="btn pri" data-close>OK</button></div>`)}};
+function pickFile(){const i=document.createElement('input'); i.type='file'; i.addEventListener('change',()=>{if(i.files[0]) loadScan(i.files[0])}); i.click()}
 async function loadScan(file){
   openModal(`<h3>Reading scan…</h3><p>${esc(file.name)} · ${(file.size/1048576).toFixed(1)} MB. Big Matterport files can take a minute.</p>`);
   await new Promise(r=>setTimeout(r,50));
   try{const raw=await readScanFile(file); if(raw.length<27) throw new Error('No geometry found in that file');
     scan={raw,name:file.name.replace(/\.[^.]+$/,''),up:'auto',square:true}; orientScan(); scanModal();
-  }catch(err){openModal(`<h3>Couldn't read that scan</h3><p>${esc(err.message||String(err))}</p><p>Export a GLB or OBJ (or a zip with one inside) from your scanning app.</p><div class="bar"><button class="btn pri" data-close>OK</button></div>`)}}
+  }catch(err){openModal(`<h3>Couldn't read that scan</h3><p>${esc(err.message||String(err))}</p><p>Export a GLB, OBJ or GLTF (or the zip the app gives you) from your scanning app.</p><div class="bar"><button class="btn pri" data-close>OK</button></div>`)}}
 async function readScanFile(file){
   let name=file.name.toLowerCase(), buf=await file.arrayBuffer();
-  if(name.endsWith('.zip')){if(!window.JSZip) throw new Error('Zip support didn\'t load. Unzip the file and pick the .obj or .glb inside.');
-    const z=await JSZip.loadAsync(buf), ents=Object.values(z.files).filter(f=>!f.dir&&/\.(obj|glb)$/i.test(f.name)&&!/__MACOSX/.test(f.name));
-    if(!ents.length) throw new Error('No .obj or .glb inside that zip'); let best=null,bs=-1;
-    for(const e of ents){const b=await e.async('arraybuffer'); if(b.byteLength>bs){bs=b.byteLength;best={e,b}}} name=best.e.name.toLowerCase(); buf=best.b}
+  let zip=null, dir='';
+  if(name.endsWith('.zip')){if(!window.JSZip) throw new Error('Zip support didn\'t load. Unzip the file and pick the .obj, .glb or .gltf inside.');
+    zip=await JSZip.loadAsync(buf); const ents=Object.values(zip.files).filter(f=>!f.dir&&/\.(obj|glb|gltf)$/i.test(f.name)&&!/__MACOSX/.test(f.name));
+    if(!ents.length) throw new Error('No .obj, .glb or .gltf inside that zip'); let best=null,bs=-1;
+    for(const e of ents){const b=await e.async('arraybuffer'); if(b.byteLength>bs){bs=b.byteLength;best={e,b}}} name=best.e.name.toLowerCase(); buf=best.b; dir=best.e.name.includes('/')?best.e.name.replace(/[^/]*$/,''):''}
   if(name.endsWith('.obj')) return parseOBJ(buf); if(name.endsWith('.glb')) return parseGLB(buf);
-  throw new Error('RoomShot reads .obj, .glb or .zip scan files')}
+  if(name.endsWith('.gltf')){const json=JSON.parse(new TextDecoder().decode(buf)), bufs=[];
+    for(const b of json.buffers||[]){const u=b.uri||'';
+      if(u.startsWith('data:')) bufs.push(b64buf(u.slice(u.indexOf(',')+1)));
+      else if(zip){const f=zip.file(dir+decodeURIComponent(u))||zip.file(decodeURIComponent(u)); bufs.push(f?await f.async('arraybuffer'):null)}
+      else throw new Error('This .gltf keeps its data in a separate file. Pick the whole zip from the scanning app instead.')}
+    return parseGLTF(json,bufs)}
+  throw new Error('RoomShot reads .obj, .glb, .gltf or .zip scan files')}
 function parseOBJ(buf){const t=new TextDecoder().decode(buf), V=[], out=[]; let i=0; const n=t.length;
   while(i<n){let j=t.indexOf('\n',i); if(j<0) j=n; const c0=t.charCodeAt(i),c1=t.charCodeAt(i+1);
     if(c0===118&&(c1===32||c1===9)){const p=t.slice(i+2,j).trim().split(/\s+/); V.push(+p[0],+p[1],+p[2])}
@@ -605,13 +633,16 @@ function parseOBJ(buf){const t=new TextDecoder().decode(buf), V=[], out=[]; let 
   return Float32Array.from(out)}
 function parseGLB(buf){const dv=new DataView(buf); if(dv.getUint32(0,true)!==0x46546C67) throw new Error('That isn\'t a GLB file');
   let off=12,json=null,bin=null; while(off+8<=dv.byteLength){const len=dv.getUint32(off,true),type=dv.getUint32(off+4,true),st=off+8;
-    if(type===0x4E4F534A) json=JSON.parse(new TextDecoder().decode(new Uint8Array(buf,st,len))); else if(type===0x004E4942) bin=st; off=st+len}
-  if(!json||bin==null) throw new Error('This GLB has no embedded geometry');
-  if((json.extensionsUsed||[]).some(x=>/draco|meshopt/i.test(x))) throw new Error('This GLB is compressed. Export OBJ instead.');
-  const out=[];
-  const base=i=>{const a=json.accessors[i],bv=json.bufferViews[a.bufferView];return{a,bv,o:bin+(bv.byteOffset||0)+(a.byteOffset||0)}};
-  const readPos=i=>{const {a,bv,o}=base(i),st=bv.byteStride||12,r=new Float32Array(a.count*3); for(let k=0;k<a.count;k++){const p=o+k*st;r[k*3]=dv.getFloat32(p,true);r[k*3+1]=dv.getFloat32(p+4,true);r[k*3+2]=dv.getFloat32(p+8,true)} return r};
-  const readIdx=i=>{const {a,o}=base(i),sz={5121:1,5123:2,5125:4}[a.componentType],r=new Uint32Array(a.count); for(let k=0;k<a.count;k++){const p=o+k*sz;r[k]=sz===1?dv.getUint8(p):sz===2?dv.getUint16(p,true):dv.getUint32(p,true)} return r};
+    if(type===0x4E4F534A) json=JSON.parse(new TextDecoder().decode(new Uint8Array(buf,st,len))); else if(type===0x004E4942) bin=buf.slice(st,st+len); off=st+len}
+  if(!json) throw new Error('This GLB has no geometry');
+  return parseGLTF(json,[bin])}
+function b64buf(s){const bin=atob(s),u=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);return u.buffer}
+function parseGLTF(json,bufs){
+  if((json.extensionsUsed||[]).some(x=>/draco|meshopt/i.test(x))) throw new Error('This file uses mesh compression, which RoomShot can\'t read. Turn off compression in the export settings, or export OBJ.');
+  const out=[], dvs=bufs.map(b=>b?new DataView(b):null);
+  const base=i=>{const a=json.accessors[i],bv=json.bufferViews[a.bufferView],dv=dvs[bv.buffer||0]; if(!dv) throw new Error('The scan\'s data file is missing. Send the whole zip from the scanning app.'); return{a,bv,dv,o:(bv.byteOffset||0)+(a.byteOffset||0)}};
+  const readPos=i=>{const {a,bv,dv,o}=base(i),st=bv.byteStride||12,r=new Float32Array(a.count*3); for(let k=0;k<a.count;k++){const p=o+k*st;r[k*3]=dv.getFloat32(p,true);r[k*3+1]=dv.getFloat32(p+4,true);r[k*3+2]=dv.getFloat32(p+8,true)} return r};
+  const readIdx=i=>{const {a,dv,o}=base(i),sz={5121:1,5123:2,5125:4}[a.componentType],r=new Uint32Array(a.count); for(let k=0;k<a.count;k++){const p=o+k*sz;r[k]=sz===1?dv.getUint8(p):sz===2?dv.getUint16(p,true):dv.getUint32(p,true)} return r};
   const nodeMat=nd=>{if(nd.matrix) return nd.matrix; const [x,y,z,w]=nd.rotation||[0,0,0,1],s=nd.scale||[1,1,1],t=nd.translation||[0,0,0];
     return[(1-2*(y*y+z*z))*s[0],2*(x*y+z*w)*s[0],2*(x*z-y*w)*s[0],0, 2*(x*y-z*w)*s[1],(1-2*(x*x+z*z))*s[1],2*(y*z+x*w)*s[1],0, 2*(x*z+y*w)*s[2],2*(y*z-x*w)*s[2],(1-2*(x*x+y*y))*s[2],0, t[0],t[1],t[2],1]};
   const mm=(a,b)=>{const r=new Array(16);for(let c=0;c<4;c++)for(let w=0;w<4;w++){let s=0;for(let k=0;k<4;k++)s+=a[k*4+w]*b[c*4+k];r[c*4+w]=s}return r};
@@ -722,8 +753,35 @@ function profileFor(T,P,w){
     const known=[...med.keys()].filter(i=>!isNaN(med[i])); if(!known.length) return med.fill(def);
     for(let i=0;i<nb;i++){if(!isNaN(med[i])) continue; let lo=-1,hi=-1; for(const k of known){if(k<i)lo=k;else{hi=k;break}} med[i]=lo<0?med[hi]:hi<0?med[lo]:med[lo]+(med[hi]-med[lo])*(i-lo)/(hi-lo)} return med};
   const F=fix(fl,fz),C=fix(ce,scan.ceilLow), X=i=>Math.min(i*bin,Sw);
-  const keep=new Set([...rdp([...Array(nb).keys()].map(i=>[X(i),C[i]]),0.03),...rdp([...Array(nb).keys()].map(i=>[X(i),F[i]]),0.02)]);
-  return [...keep].sort((p,q)=>p-q).map(i=>({x:+X(i).toFixed(3),f:+(F[i]-F[0]).toFixed(3),h:+(C[i]-F[i]).toFixed(3)}))}
+  return simplifyProfile([...Array(nb).keys()].map(i=>({x:X(i),fa:F[i],ca:C[i]})))}
+// Turn a dense scanned profile into as few points as possible.
+// Floor and ceiling are each made perfectly flat when their spread is within the tolerance;
+// otherwise they're simplified with the tolerance and near-level runs are snapped level.
+function flatTol(){return S.flatTol||0.10}
+function simplifyProfile(D){
+  const tol=flatTol(), tolF=Math.min(tol,0.06), n=D.length;
+  if(n>8){ // smooth scanner noise with a ~0.3 m running median before fitting lines
+    const win=Math.max(2,Math.round(0.15/((D[n-1].x-D[0].x)/(n-1)||0.05))), med=a=>a.sort((x,y)=>x-y)[a.length>>1];
+    D=D.map((d,i)=>{const s=D.slice(Math.max(0,i-win),i+win+1);return{x:d.x,fa:med(s.map(q=>q.fa)),ca:med(s.map(q=>q.ca))}})}
+  const pct=(a,q)=>{const s=a.slice().sort((x,y)=>x-y);return s[Math.min(s.length-1,Math.max(0,Math.round(q*(s.length-1))))]};
+  const level=(key,t)=>{const v=D.map(d=>d[key]);
+    if(pct(v,0.9)-pct(v,0.1)<=t){const m=pct(v,0.5);return{idx:[0,n-1],val:()=>m}}
+    const idx=rdp(D.map(d=>[d.x,d[key]]),t*0.75);
+    // snap nearly-level segments and average runs that sit at the same height
+    const pts=idx.map(i=>({i,y:D[i][key]}));
+    for(let k=1;k<pts.length;k++){const a=pts[k-1],b=pts[k]; if(Math.abs(b.y-a.y)<t*0.6){const m=(a.y+b.y)/2;a.y=m;b.y=m}}
+    const keep=pts.filter((p,k)=>k===0||k===pts.length-1||!(Math.abs(p.y-pts[k-1].y)<1e-9&&Math.abs(p.y-pts[k+1].y)<1e-9));
+    const at=x=>{for(let k=1;k<keep.length;k++){const a=keep[k-1],b=keep[k],xa=D[a.i].x,xb=D[b.i].x; if(x<=xb+1e-9) return xb-xa<1e-9?b.y:a.y+(b.y-a.y)*(x-xa)/(xb-xa)} return keep[keep.length-1].y};
+    return{idx:keep.map(p=>p.i),val:at}};
+  const fl=level('fa',tolF), ce=level('ca',tol);
+  const xs=[...new Set([...fl.idx,...ce.idx])].sort((a,b)=>a-b).map(i=>D[i].x);
+  const f0=fl.val(D[0].x);
+  return xs.map(x=>({x:+x.toFixed(3),f:+(fl.val(x)-f0).toFixed(3),h:+(ce.val(x)-fl.val(x)).toFixed(3)}))}
+function flattenRoom(r){
+  const fix=pts=>{if(!pts||pts.length<2) return pts; return simplifyProfile(pts.map(p=>({x:p.x,fa:p.f||0,ca:(p.f||0)+p.h})))};
+  r.sec.pts=fix(r.sec.pts.filter(p=>p.x!=null&&p.h!=null).sort((a,b)=>a.x-b.x));
+  if(r.scanSecs) for(const k in r.scanSecs) r.scanSecs[k]=fix(r.scanSecs[k]);
+  const hs=r.sec.pts.map(p=>p.h).sort((a,b)=>a-b); if(hs.length) r.ceil=hs[hs.length>>1]}
 function scanPreview(){
   const W=420,H=300,P=SCREEN,sg=scan.segs||[]; if(!sg.length) return emptySVG(W,200,P,scan.err||'Nothing to show');
   let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity; for(let k=0;k<sg.length;k+=2){x0=Math.min(x0,sg[k]);x1=Math.max(x1,sg[k]);y0=Math.min(y0,sg[k+1]);y1=Math.max(y1,sg[k+1])}
